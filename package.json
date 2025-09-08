@@ -1,0 +1,33 @@
+{
+  "name": "thirdweb-tipping-chain",
+  "version": "1.0.0",
+  "description": "Cross-chain tipping solution with ApeChain USDC settlement",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "compile": "npx thirdweb compile",
+    "deploy": "npx thirdweb deploy",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.4.0",
+    "@thirdweb-dev/chains": "^0.1.0",
+    "ethers": "^6.0.0",
+    "next": "^14.0.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "thirdweb": "^5.0.0"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "autoprefixer": "^10.0.0",
+    "hardhat": "^3.0.4",
+    "postcss": "^8.0.0",
+    "tailwindcss": "^3.0.0",
+    "typescript": "^5.0.0"
+  }
+}

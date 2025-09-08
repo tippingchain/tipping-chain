@@ -1,0 +1,383 @@
+name: Production Deployment
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - staging
+        - production
+
+env:
+  NODE_VERSION: '18.x'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  security-checks:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run security audit
+      run: npm audit --audit-level=high
+
+    - name: Check for secrets
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+
+    - name: Smart Contract Security Analysis
+      run: |
+        pip install slither-analyzer
+        slither contracts/ --exclude-dependencies --json slither-report.json
+        
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          slither-report.json
+          npm-audit.json
+
+  test-and-build:
+    name: Test & Build
+    runs-on: ubuntu-latest
+    needs: security-checks
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run linting
+      run: npm run lint
+
+    - name: Run type checking
+      run: npm run type-check
+
+    - name: Run tests
+      run: npm test -- --coverage --watchAll=false
+      env:
+        CI: true
+
+    - name: Upload test coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage/lcov.info
+
+    - name: Build application
+      run: npm run build
+      env:
+        NODE_ENV: production
+        NEXT_PUBLIC_THIRDWEB_CLIENT_ID: ${{ secrets.THIRDWEB_CLIENT_ID }}
+
+    - name: Get version
+      id: version
+      run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-artifacts
+        path: |
+          .next/
+          out/
+          package.json
+          package-lock.json
+
+  smart-contract-deploy:
+    name: Deploy Smart Contracts
+    runs-on: ubuntu-latest
+    needs: [security-checks, test-and-build]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    environment: 
+      name: ${{ github.event.inputs.environment || 'production' }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Compile contracts
+      run: npx thirdweb compile
+
+    - name: Deploy StreamerRegistry
+      id: deploy-registry
+      run: |
+        REGISTRY_ADDRESS=$(npx thirdweb deploy contracts/StreamerRegistry.sol --network ethereum-mainnet --private-key ${{ secrets.DEPLOYER_PRIVATE_KEY }} --json | jq -r '.address')
+        echo "registry_address=$REGISTRY_ADDRESS" >> $GITHUB_OUTPUT
+      env:
+        THIRDWEB_SECRET_KEY: ${{ secrets.THIRDWEB_SECRET_KEY }}
+
+    - name: Deploy TippingContract
+      id: deploy-tipping
+      run: |
+        TIPPING_ADDRESS=$(npx thirdweb deploy contracts/TippingContract.sol --network ethereum-mainnet --private-key ${{ secrets.DEPLOYER_PRIVATE_KEY }} --constructor-args ${{ secrets.PLATFORM_WALLET_ADDRESS }} ${{ steps.deploy-registry.outputs.registry_address }} --json | jq -r '.address')
+        echo "tipping_address=$TIPPING_ADDRESS" >> $GITHUB_OUTPUT
+      env:
+        THIRDWEB_SECRET_KEY: ${{ secrets.THIRDWEB_SECRET_KEY }}
+
+    - name: Deploy CrossChainTippingBridge
+      id: deploy-bridge
+      run: |
+        BRIDGE_ADDRESS=$(npx thirdweb deploy contracts/CrossChainTippingBridge.sol --network ethereum-mainnet --private-key ${{ secrets.DEPLOYER_PRIVATE_KEY }} --constructor-args ${{ secrets.THIRDWEB_BRIDGE_ADDRESS }} ${{ secrets.UNISWAP_ROUTER_ADDRESS }} --json | jq -r '.address')
+        echo "bridge_address=$BRIDGE_ADDRESS" >> $GITHUB_OUTPUT
+      env:
+        THIRDWEB_SECRET_KEY: ${{ secrets.THIRDWEB_SECRET_KEY }}
+
+    - name: Verify contracts on Etherscan
+      run: |
+        npx hardhat verify --network mainnet ${{ steps.deploy-registry.outputs.registry_address }}
+        npx hardhat verify --network mainnet ${{ steps.deploy-tipping.outputs.tipping_address }} ${{ secrets.PLATFORM_WALLET_ADDRESS }} ${{ steps.deploy-registry.outputs.registry_address }}
+        npx hardhat verify --network mainnet ${{ steps.deploy-bridge.outputs.bridge_address }} ${{ secrets.THIRDWEB_BRIDGE_ADDRESS }} ${{ secrets.UNISWAP_ROUTER_ADDRESS }}
+      env:
+        ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+
+    - name: Update environment variables
+      run: |
+        echo "STREAMER_REGISTRY_ADDRESS=${{ steps.deploy-registry.outputs.registry_address }}" >> contract-addresses.env
+        echo "TIPPING_CONTRACT_ADDRESS=${{ steps.deploy-tipping.outputs.tipping_address }}" >> contract-addresses.env
+        echo "BRIDGE_CONTRACT_ADDRESS=${{ steps.deploy-bridge.outputs.bridge_address }}" >> contract-addresses.env
+
+    - name: Upload contract addresses
+      uses: actions/upload-artifact@v3
+      with:
+        name: contract-addresses
+        path: contract-addresses.env
+
+  deploy-frontend:
+    name: Deploy Frontend
+    runs-on: ubuntu-latest
+    needs: [test-and-build, smart-contract-deploy]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    environment: 
+      name: ${{ github.event.inputs.environment || 'production' }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: build-artifacts
+
+    - name: Download contract addresses
+      uses: actions/download-artifact@v3
+      with:
+        name: contract-addresses
+
+    - name: Load contract addresses
+      run: |
+        source contract-addresses.env
+        echo "STREAMER_REGISTRY_ADDRESS=$STREAMER_REGISTRY_ADDRESS" >> $GITHUB_ENV
+        echo "TIPPING_CONTRACT_ADDRESS=$TIPPING_CONTRACT_ADDRESS" >> $GITHUB_ENV
+        echo "BRIDGE_CONTRACT_ADDRESS=$BRIDGE_CONTRACT_ADDRESS" >> $GITHUB_ENV
+
+    - name: Deploy to Vercel
+      uses: amondnet/vercel-action@v25
+      with:
+        vercel-token: ${{ secrets.VERCEL_TOKEN }}
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+        vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+        vercel-args: '--prod'
+        scope: ${{ secrets.VERCEL_ORG_ID }}
+      env:
+        NEXT_PUBLIC_THIRDWEB_CLIENT_ID: ${{ secrets.THIRDWEB_CLIENT_ID }}
+        NEXT_PUBLIC_PLATFORM_WALLET: ${{ secrets.PLATFORM_WALLET_ADDRESS }}
+        NEXT_PUBLIC_TIPPING_CONTRACT: ${{ env.TIPPING_CONTRACT_ADDRESS }}
+        NEXT_PUBLIC_STREAMER_REGISTRY: ${{ env.STREAMER_REGISTRY_ADDRESS }}
+        NEXT_PUBLIC_BRIDGE_CONTRACT: ${{ env.BRIDGE_CONTRACT_ADDRESS }}
+        NEXT_PUBLIC_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
+  deploy-api:
+    name: Deploy API Services
+    runs-on: ubuntu-latest
+    needs: [test-and-build, smart-contract-deploy]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    environment: 
+      name: ${{ github.event.inputs.environment || 'production' }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download contract addresses
+      uses: actions/download-artifact@v3
+      with:
+        name: contract-addresses
+
+    - name: Load contract addresses
+      run: |
+        source contract-addresses.env
+        echo "STREAMER_REGISTRY_ADDRESS=$STREAMER_REGISTRY_ADDRESS" >> $GITHUB_ENV
+        echo "TIPPING_CONTRACT_ADDRESS=$TIPPING_CONTRACT_ADDRESS" >> $GITHUB_ENV
+        echo "BRIDGE_CONTRACT_ADDRESS=$BRIDGE_CONTRACT_ADDRESS" >> $GITHUB_ENV
+
+    - name: Deploy to Railway
+      uses: bervProject/railway-deploy@v1.0.9
+      with:
+        railway_token: ${{ secrets.RAILWAY_TOKEN }}
+        service: streamtip-api
+      env:
+        THIRDWEB_SECRET_KEY: ${{ secrets.THIRDWEB_SECRET_KEY }}
+        PLATFORM_WALLET_PRIVATE_KEY: ${{ secrets.PLATFORM_WALLET_PRIVATE_KEY }}
+        MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        REDIS_URL: ${{ secrets.REDIS_URL }}
+        TIPPING_CONTRACT_ADDRESS: ${{ env.TIPPING_CONTRACT_ADDRESS }}
+        STREAMER_REGISTRY_ADDRESS: ${{ env.STREAMER_REGISTRY_ADDRESS }}
+        BRIDGE_CONTRACT_ADDRESS: ${{ env.BRIDGE_CONTRACT_ADDRESS }}
+
+  post-deployment:
+    name: Post-Deployment Checks
+    runs-on: ubuntu-latest
+    needs: [deploy-frontend, deploy-api]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Health check - Frontend
+      run: |
+        curl -f https://streamtip.app/health || exit 1
+        curl -f https://streamtip.app/api/health || exit 1
+
+    - name: Health check - API
+      run: |
+        curl -f https://api.streamtip.app/v1/health || exit 1
+
+    - name: Run smoke tests
+      run: |
+        npm ci
+        npm run test:smoke
+      env:
+        API_BASE_URL: https://api.streamtip.app/v1
+        FRONTEND_BASE_URL: https://streamtip.app
+
+    - name: Update status page
+      run: |
+        curl -X POST ${{ secrets.STATUS_PAGE_WEBHOOK }} \
+          -H "Content-Type: application/json" \
+          -d '{"status": "operational", "message": "Deployment completed successfully"}'
+
+    - name: Notify team
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        text: |
+          🚀 StreamTip Production Deployment Complete
+          Version: ${{ needs.test-and-build.outputs.version }}
+          Frontend: https://streamtip.app
+          API: https://api.streamtip.app/v1
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+      if: always()
+
+  security-monitoring:
+    name: Enable Security Monitoring
+    runs-on: ubuntu-latest
+    needs: [deploy-frontend, deploy-api]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup monitoring alerts
+      run: |
+        # Enable Datadog monitoring
+        curl -X POST "https://api.datadoghq.com/api/v1/monitor" \
+          -H "Content-Type: application/json" \
+          -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
+          -H "DD-APPLICATION-KEY: ${{ secrets.DATADOG_APP_KEY }}" \
+          -d '{
+            "type": "service check",
+            "query": "\"http.can_connect\".over(\"instance:streamtip.app\").last(2).count_by_status()",
+            "name": "StreamTip Frontend Health Check",
+            "message": "StreamTip frontend is down",
+            "tags": ["environment:production", "service:frontend"],
+            "options": {
+              "thresholds": {"critical": 1, "warning": 1},
+              "notify_no_data": true,
+              "no_data_timeframe": 10
+            }
+          }'
+
+    - name: Enable security scanning
+      run: |
+        # Trigger OWASP ZAP baseline scan
+        docker run -v $(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py \
+          -t https://streamtip.app \
+          -g gen.conf \
+          -r security-scan-report.html
+
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-scan-results
+        path: security-scan-report.html
+
+  rollback-preparation:
+    name: Prepare Rollback
+    runs-on: ubuntu-latest
+    needs: [deploy-frontend, deploy-api]
+    steps:
+    - name: Store deployment snapshot
+      run: |
+        echo "{
+          \"deployment_id\": \"${{ github.run_id }}\",
+          \"version\": \"${{ needs.test-and-build.outputs.version }}\",
+          \"commit_sha\": \"${{ github.sha }}\",
+          \"deployed_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+          \"services\": {
+            \"frontend\": \"https://streamtip.app\",
+            \"api\": \"https://api.streamtip.app/v1\"
+          }
+        }" > deployment-snapshot.json
+
+    - name: Upload deployment snapshot
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-snapshot
+        path: deployment-snapshot.json
+
+    - name: Tag successful deployment
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git tag -a "deploy-prod-$(date +%Y%m%d-%H%M%S)" -m "Production deployment ${{ github.run_id }}"
+        git push origin --tags
