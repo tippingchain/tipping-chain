@@ -162,3 +162,15 @@ playwright-report/
 # Temporary files
 *.tmp
 *.temp
+
+# Firebase
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+functions/node_modules/
+functions/lib/
+functions/.env
+ui-debug.log
+
+# GitHub Pages
+.nojekyll

@@ -1,0 +1,65 @@
+name: Deploy Production to Firebase Hosting
+
+on:
+  push:
+    branches: [ prod ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup production environment
+        run: |
+          echo "NEXT_PUBLIC_THIRDWEB_CLIENT_ID=${{ secrets.PROD_THIRDWEB_CLIENT_ID }}" >> .env.local
+          echo "NEXT_PUBLIC_TIPPING_CONTRACT=${{ secrets.PROD_TIPPING_CONTRACT }}" >> .env.local
+          echo "NEXT_PUBLIC_STREAMER_REGISTRY=${{ secrets.PROD_STREAMER_REGISTRY }}" >> .env.local
+          echo "NEXT_PUBLIC_BRIDGE_CONTRACT=${{ secrets.PROD_BRIDGE_CONTRACT }}" >> .env.local
+          echo "NEXT_PUBLIC_PLATFORM_WALLET=${{ secrets.PROD_PLATFORM_WALLET }}" >> .env.local
+          echo "NEXT_PUBLIC_APECHAIN_USDC_ADDRESS=${{ secrets.PROD_APECHAIN_USDC_ADDRESS }}" >> .env.local
+          echo "NEXT_PUBLIC_DEMO_MODE=false" >> .env.local
+          echo "NEXT_PUBLIC_DATADOG_API_KEY=${{ secrets.PROD_DATADOG_API_KEY }}" >> .env.local
+          echo "NEXT_PUBLIC_SENTRY_DSN=${{ secrets.PROD_SENTRY_DSN }}" >> .env.local
+
+      - name: Run tests
+        run: npm test --if-present
+
+      - name: Build application
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Setup Firebase CLI
+        uses: w9jds/setup-firebase@main
+        with:
+          tools-version: 13.0.1
+          firebase-token: ${{ secrets.FIREBASE_TOKEN }}
+
+      - name: Deploy to Firebase Hosting
+        run: |
+          firebase deploy --only hosting --project ${{ secrets.FIREBASE_PROJECT_ID }}
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+
+      - name: Health Check
+        run: |
+          sleep 30
+          curl -f https://${{ secrets.FIREBASE_PROJECT_ID }}.web.app/api/health || exit 1
+
+      - name: Notify Deployment
+        if: success()
+        run: |
+          echo "🚀 Production deployment successful!"
+          echo "Site URL: https://${{ secrets.FIREBASE_PROJECT_ID }}.web.app"
