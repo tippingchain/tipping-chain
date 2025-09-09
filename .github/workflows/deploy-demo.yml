@@ -44,10 +44,36 @@ jobs:
         run: |
           # Remove API routes and backend services for static export
           rm -rf src/app/api
-          rm -f src/lib/settlement-service.ts
           rm -f src/lib/bridge.ts  
           rm -f src/lib/batch-processor.ts
           rm -f src/lib/monitoring.ts
+          
+          # Create minimal settlement service stub
+          cat > src/lib/settlement-service.ts << 'EOF'
+          export interface SettlementStatus {
+            id: string;
+            streamer: string;
+            businessWallet: string;
+            status: 'pending' | 'batching' | 'converting' | 'bridging' | 'completed' | 'failed';
+            tipIds: string[];
+            totalAmount: string;
+            token: string;
+            chain: number;
+            timestamp: number;
+            txHash?: string;
+            errorMessage?: string;
+            estimatedSettlementTime?: number;
+          }
+          
+          export class SettlementService {
+            getStreamerSettlements(): SettlementStatus[] { return []; }
+            getPendingSettlementsTotal(): any { return {}; }
+            getSettlementAnalytics(): any { return { totalVolume: 0, totalTips: 0, averageTip: 0, topTokens: [], recentTips: [] }; }
+            async processTipForSettlement(): Promise<string> { return 'demo_settlement_' + Date.now(); }
+          }
+          
+          export const settlementService = new SettlementService();
+          EOF
 
       - name: Update Next.js config for demo
         run: |
