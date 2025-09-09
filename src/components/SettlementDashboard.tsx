@@ -2,7 +2,13 @@
 
 import React, { useState, useEffect } from 'react'
 import { useActiveAccount } from "thirdweb/react"
-import { settlementService } from '../lib/settlement-service'
+// Conditionally import settlement service (may not be available in demo mode)
+let settlementService: any = null;
+try {
+  settlementService = require('../lib/settlement-service').settlementService;
+} catch (e) {
+  // Settlement service not available in demo mode
+}
 import { SUPPORTED_CHAINS, SUPPORTED_TOKENS } from '../lib/constants'
 
 interface SettlementDashboardProps {
@@ -35,17 +41,30 @@ export const SettlementDashboard: React.FC<SettlementDashboardProps> = ({
     if (!activeStreamerAddress) return
 
     try {
-      // Load settlement history
-      const settlementHistory = settlementService.getStreamerSettlements(activeStreamerAddress)
-      setSettlements(settlementHistory)
+      if (settlementService) {
+        // Load settlement history
+        const settlementHistory = settlementService.getStreamerSettlements(activeStreamerAddress)
+        setSettlements(settlementHistory)
 
-      // Load pending settlements
-      const pending = settlementService.getPendingSettlementsTotal(activeStreamerAddress)
-      setPendingSettlements(pending)
+        // Load pending settlements
+        const pending = settlementService.getPendingSettlementsTotal(activeStreamerAddress)
+        setPendingSettlements(pending)
 
-      // Load analytics
-      const analyticsData = settlementService.getSettlementAnalytics(activeStreamerAddress)
-      setAnalytics(analyticsData)
+        // Load analytics
+        const analyticsData = settlementService.getSettlementAnalytics(activeStreamerAddress)
+        setAnalytics(analyticsData)
+      } else {
+        // Demo mode - set empty data
+        setSettlements([])
+        setPendingSettlements({})
+        setAnalytics({
+          totalVolume: 0,
+          totalTips: 0,
+          averageTip: 0,
+          topTokens: [],
+          recentTips: []
+        })
+      }
 
     } catch (error) {
       console.error('Error loading dashboard data:', error)

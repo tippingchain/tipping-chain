@@ -6,7 +6,13 @@ import { prepareContractCall, sendTransaction } from "thirdweb"
 import { getContract } from "thirdweb"
 import { client } from '../lib/thirdweb'
 import { SUPPORTED_CHAINS, SUPPORTED_TOKENS, TIP_AMOUNTS, CONTRACTS } from '../lib/constants'
-import { settlementService } from '../lib/settlement-service'
+// Conditionally import settlement service (may not be available in demo mode)
+let settlementService: any = null;
+try {
+  settlementService = require('../lib/settlement-service').settlementService;
+} catch (e) {
+  // Settlement service not available in demo mode
+}
 
 interface TippingWidgetProps {
   streamerAddress: string
@@ -92,14 +98,14 @@ export const TippingWidget: React.FC<TippingWidgetProps> = ({
       // Prepare the tip transaction
       const transaction = prepareContractCall({
         contract: tippingContract,
-        method: "tip",
+        method: "function tip(address streamer, address token, uint256 amount, string memory message) payable",
         params: [
           streamerAddress,
           selectedToken.address,
-          tipAmount,
+          BigInt(tipAmount),
           message || ""
         ],
-        value: selectedToken.address === '0x0000000000000000000000000000000000000000' ? tipAmount : 0n
+        value: selectedToken.address === '0x0000000000000000000000000000000000000000' ? BigInt(tipAmount) : BigInt(0)
       })
 
       // Send transaction
@@ -112,17 +118,20 @@ export const TippingWidget: React.FC<TippingWidgetProps> = ({
       
       setTxStatus('success')
 
-      // Process tip for settlement
+      // Process tip for settlement (if service is available)
       try {
-        const settlementId = await settlementService.processTipForSettlement(
-          result.transactionHash,
-          streamerAddress,
-          account.address, // business wallet for now - should be from registry
-          selectedToken.address,
-          tipAmount,
-          selectedChain.id,
-          message
-        )
+        let settlementId = 'demo_settlement_' + Date.now();
+        if (settlementService) {
+          settlementId = await settlementService.processTipForSettlement(
+            result.transactionHash,
+            streamerAddress,
+            account.address, // business wallet for now - should be from registry
+            selectedToken.address,
+            tipAmount,
+            selectedChain.id,
+            message
+          );
+        }
         
         setSettlementInfo({
           id: settlementId,
@@ -169,8 +178,12 @@ export const TippingWidget: React.FC<TippingWidgetProps> = ({
   }
 
   const updatePendingSettlements = () => {
-    const pending = settlementService.getPendingSettlementsTotal(streamerAddress)
-    setPendingSettlements(pending)
+    if (settlementService) {
+      const pending = settlementService.getPendingSettlementsTotal(streamerAddress)
+      setPendingSettlements(pending)
+    } else {
+      setPendingSettlements({})
+    }
   }
 
   // Update pending settlements on component mount and chain change
