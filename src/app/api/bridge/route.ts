@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
           )
         }
 
-        const batchResult = await bridgeService.processBatch(batchId)
+        const batchResult = await bridgeService.processBatchById(batchId)
         
         return NextResponse.json({
           success: true,

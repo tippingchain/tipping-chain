@@ -39,7 +39,85 @@ jobs:
           echo "NEXT_PUBLIC_STREAMER_REGISTRY=0x0000000000000000000000000000000000000000" >> .env.local
           echo "NEXT_PUBLIC_BRIDGE_CONTRACT=0x0000000000000000000000000000000000000000" >> .env.local
           echo "NEXT_PUBLIC_DEMO_MODE=true" >> .env.local
+          
+      - name: Create demo-only components
+        run: |
+          # Remove API routes for static export
+          rm -rf src/app/api
+          
+          # Create simplified settlement service for demo
+          cat > src/lib/settlement-service-demo.ts << 'EOF'
+          export interface SettlementStatus {
+            id: string;
+            streamer: string;
+            businessWallet: string;
+            status: 'pending' | 'batching' | 'converting' | 'bridging' | 'completed' | 'failed';
+            tipIds: string[];
+            totalAmount: string;
+            token: string;
+            chain: number;
+            timestamp: number;
+            txHash?: string;
+            errorMessage?: string;
+            estimatedSettlementTime?: number;
+          }
+          
+          export class SettlementService {
+            getStreamerSettlements(streamer: string): SettlementStatus[] {
+              return [];
+            }
+            
+            getPendingSettlementsTotal(streamer: string): any {
+              return {};
+            }
+            
+            getSettlementAnalytics(streamer: string): any {
+              return {
+                totalVolume: 0,
+                totalTips: 0,
+                averageTip: 0,
+                topTokens: [],
+                recentTips: []
+              };
+            }
+            
+            async processTipForSettlement(...args: any[]): Promise<string> {
+              return 'demo_settlement_' + Date.now();
+            }
+          }
+          
+          export const settlementService = new SettlementService();
+          EOF
+          
+          # Update imports in SettlementDashboard
+          sed -i 's/from '\''..\/lib\/settlement-service'\''/from '\''..\/lib\/settlement-service-demo'\''/g' src/components/SettlementDashboard.tsx
+          
+          # Update imports in TippingWidget  
+          sed -i 's/from '\''..\/lib\/settlement-service'\''/from '\''..\/lib\/settlement-service-demo'\''/g' src/components/TippingWidget.tsx
 
+      - name: Update Next.js config for demo
+        run: |
+          cat > next.config.js << 'EOF'
+          /** @type {import('next').NextConfig} */
+          const nextConfig = {
+            output: 'export',
+            basePath: '/thirdweb-tippingchain',
+            assetPrefix: '/thirdweb-tippingchain',
+            images: {
+              unoptimized: true
+            },
+            trailingSlash: true,
+            eslint: {
+              ignoreDuringBuilds: true,
+            },
+            typescript: {
+              ignoreBuildErrors: true,
+            }
+          }
+          
+          module.exports = nextConfig
+          EOF
+      
       - name: Build application
         run: |
           npm run build
